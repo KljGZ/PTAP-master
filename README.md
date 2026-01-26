@@ -10,11 +10,14 @@ pip install -r requirements.txt
 ```
 
 ## Quick Start
-1) 首先解压 `pre_model` 下的后门模型：
-```bash
-bash pre_model/unzip_model.sh
-```
-或者你可以通过 `attack/eval_bd/train_models` 和 `attack/third_party/BackdoorBench-main` 重新训练。
+Download model files from Google Drive:
+https://drive.google.com/drive/folders/1tszK6uAjsAjKxJhCwv5ySGmXpDCk529U?usp=drive_link
+1) 从 Google Drive 下载模型文件到 pre_model/ 目录：
+https://drive.google.com/drive/folders/1tszK6uAjsAjKxJhCwv5ySGmXpDCk529U?usp=drive_link
+下载完成后执行解压：
+    bash pre_model/unzip_model.sh
+如果需要，可通过 attack/eval_bd/train_models 和 attack/third_party/BackdoorBench-main 重新训练。
+
 
 2) 测试：
 
