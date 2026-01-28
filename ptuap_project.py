@@ -29,6 +29,14 @@ from loader import dataset_loader
 from attack.eval_bd.wanet_eval_test import build_wanet_bd_dataset as wanet_build_bd_dataset
 from attack.eval_bd.iad_eval_test import build_iad_bd_dataset as iad_build_bd_dataset
 from attack.eval_bd.dfst_eval import build_dfst_bd_dataset as dfst_build_bd_dataset
+from attack.eval_bd.iti_eval import build_iti_bd_dataset as iti_build_bd_dataset
+from attack.eval_bd.precision_strike_eval import build_precision_bd_dataset as precision_build_bd_dataset
+from attack.eval_bd.sgba_eval import build_sgba_bd_dataset as sgba_build_bd_dataset
+# DWT eval optional; if missing on remote, we'll warn at runtime.
+try:
+    from attack.eval_bd.dwt_eval import build_dwt_bd_dataset as dwt_build_bd_dataset
+except ModuleNotFoundError:
+    dwt_build_bd_dataset = None
 
 # ---------- argparse ----------
 def _str2bool(v):
@@ -85,12 +93,70 @@ def parse_args():
                    help="若提供，则用 IAD 生成 bd_loader。")
     p.add_argument("--iad-attack-mode", type=str, default="all2one", choices=["all2one", "all2all"])
     p.add_argument("--iad-target-label", type=int, default=0)
+    p.add_argument("--precision-ckpt", type=str, default=None,
+                   help="若提供，则用 Precision-Strike (PBADT) 生成 bd_loader。")
+    p.add_argument("--precision-target-label", type=int, default=0)
+    p.add_argument("--precision-feature-ckpt", type=str, default=None,
+                   help="Precision-Strike 清洁特征模型路径（默认同目录 clean_resnet18.pth）。")
+    p.add_argument("--precision-generator-cache", type=str, default=None,
+                   help="Precision-Strike poison_cache.pt（含 generator 权重），默认同目录下。")
+    p.add_argument("--precision-alpha", type=float, default=0.6)
+    p.add_argument("--precision-patch-size", type=int, default=5)
+    p.add_argument("--precision-batch-size", type=int, default=64)
+    p.add_argument("--precision-eval-samples", type=int, default=1000)
+    p.add_argument("--precision-seed", type=int, default=0)
     p.add_argument("--dfst-ckpt", type=str, default=None,
                    help="若提供，则用 DFST/BadNets 生成 bd_loader（同目录需有 poison_data.pt，或由脚本自动生成）。")
     p.add_argument("--dfst-target-label", type=int, default=0)
     p.add_argument("--dfst-attack-mode", type=str, default="dfst", choices=["dfst", "badnet"])
     p.add_argument("--dfst-poison-rate", type=float, default=0.05)
     p.add_argument("--dfst-alpha", type=float, default=0.6)
+    # SGBA
+    p.add_argument("--sgba-ckpt", type=str, default=None,
+                   help="If set, build SGBA bd_loader for ASR evaluation.")
+    p.add_argument("--sgba-target-label", type=int, default=0)
+    p.add_argument("--sgba-attack-mode", type=str, default="all2one", choices=["all2one", "all2all"])
+    p.add_argument("--sgba-trigger-path", type=str, default=None,
+                   help="(deprecated) Not used for SGBA; kept for CLI compatibility.")
+    p.add_argument("--sgba-feature-ckpt", type=str, default=None)
+    p.add_argument("--sgba-subspace-cache", type=str, default=None)
+    p.add_argument("--sgba-subspace-samples", type=int, default=500)
+    p.add_argument("--sgba-subspace-dim", type=int, default=20)
+    p.add_argument("--sgba-trigger-steps", type=int, default=200)
+    p.add_argument("--sgba-trigger-lr", type=float, default=0.01)
+    p.add_argument("--sgba-lambda-ce", type=float, default=1.0)
+    p.add_argument("--sgba-lambda-reg", type=float, default=1e-3)
+    p.add_argument("--sgba-init-delta-std", type=float, default=1e-3)
+    p.add_argument("--sgba-trigger-batch-size", type=int, default=16)
+    p.add_argument("--sgba-eval-samples", type=int, default=1000)
+    p.add_argument("--sgba-seed", type=int, default=0)
+    # DWT
+    p.add_argument("--dwt-ckpt", type=str, default=None,
+                   help="若提供，则用 DWT 频域动态触发生成 bd_loader（默认寻找同目录 dwt_resnet18_cifar10.pth）。")
+    p.add_argument("--dwt-target-label", type=int, default=0)
+    p.add_argument("--dwt-generator-ckpt", type=str, default=None,
+                   help="dwt_generator.pth 路径（默认同目录）。")
+    p.add_argument("--dwt-poison-cache", type=str, default=None,
+                   help="poison_cache.pt 路径（可选；缺失则在线生成）。")
+    p.add_argument("--dwt-secret-bits", type=int, default=3)
+    p.add_argument("--dwt-batch-size", type=int, default=64)
+    p.add_argument("--dwt-eval-samples", type=int, default=1000)
+    p.add_argument("--dwt-seed", type=int, default=0)
+    # ITI
+    p.add_argument("--iti-ckpt", type=str, default=None,
+                   help="If set, build ITI bd_loader for ASR evaluation (expensive; keep --iti-eval-samples small).")
+    p.add_argument("--iti-target-label", type=int, default=0)
+    p.add_argument("--iti-trigger-steps", type=int, default=800)
+    p.add_argument("--iti-trigger-lr", type=float, default=0.01)
+    p.add_argument("--iti-alpha", type=float, default=5.0)
+    p.add_argument("--iti-beta", type=float, default=20.0)
+    p.add_argument("--iti-ssim-thresh", type=float, default=0.99)
+    p.add_argument("--iti-trigger-weights", type=str, default="1,0.8,0.5,0.3,0.1")
+    p.add_argument("--iti-content-layer", type=str, default="conv2_2")
+    p.add_argument("--iti-trigger-choice", type=str, default="target", choices=["target", "random"])
+    p.add_argument("--iti-poison-batch-size", type=int, default=8)
+    p.add_argument("--iti-eval-samples", type=int, default=256)
+    p.add_argument("--iti-seed", type=int, default=0)
     # 训练
     p.add_argument("--batch-size", type=int, default=128)
     p.add_argument("--epochs", type=int, default=20)
@@ -482,6 +548,88 @@ def main():
                                            args.iad_attack_mode, args.iad_ckpt, device)
             bd_loader = DataLoader(bd_test, batch_size=args.batch_size, shuffle=False, num_workers=0)
             print("[Info] Using IAD bd_loader for ASR evaluation.")
+        elif args.precision_ckpt:
+            bd_test = precision_build_bd_dataset(
+                dataset_name=args.dataset,
+                target_label=args.precision_target_label,
+                ckpt_path=args.precision_ckpt,
+                device=device,
+                generator_cache=args.precision_generator_cache or "",
+                feature_ckpt=args.precision_feature_ckpt or "",
+                data_root=args.data_root,
+                alpha=args.precision_alpha,
+                patch_size=args.precision_patch_size,
+                batch_size=args.precision_batch_size,
+                max_samples=args.precision_eval_samples,
+                seed=args.precision_seed,
+            )
+            bd_loader = DataLoader(bd_test, batch_size=args.batch_size, shuffle=False, num_workers=0)
+            print("[Info] Using Precision-Strike bd_loader for ASR evaluation.")
+        elif args.dwt_ckpt:
+            if dwt_build_bd_dataset is None:
+                raise ImportError("DWT eval requested but attack.eval_bd.dwt_eval is missing; please update repo.")
+            bd_test = dwt_build_bd_dataset(
+                dataset_name=args.dataset,
+                target_label=args.dwt_target_label,
+                ckpt_path=args.dwt_ckpt,
+                device=device,
+                generator_ckpt=args.dwt_generator_ckpt or "",
+                poison_cache=args.dwt_poison_cache or "",
+                data_root=args.data_root,
+                secret_bits=args.dwt_secret_bits,
+                max_samples=args.dwt_eval_samples,
+                batch_size=args.dwt_batch_size,
+                seed=args.dwt_seed,
+            )
+            bd_loader = DataLoader(bd_test, batch_size=args.batch_size, shuffle=False, num_workers=0)
+            print(f"[Info] Using DWT bd_loader for ASR evaluation (samples={len(bd_test)}).")
+        elif args.sgba_ckpt:
+            if args.sgba_attack_mode != "all2one":
+                print("[Info] SGBA attack_mode=all2all not supported; using all2one.")
+            if args.sgba_trigger_path:
+                print("[Info] SGBA trigger path ignored (sample-specific triggers).")
+            bd_test = sgba_build_bd_dataset(
+                dataset_name=args.dataset,
+                target_label=args.sgba_target_label,
+                ckpt_path=args.sgba_ckpt,
+                device=device,
+                feature_ckpt=args.sgba_feature_ckpt or "",
+                subspace_cache=args.sgba_subspace_cache or "",
+                data_root=args.data_root,
+                subspace_samples=args.sgba_subspace_samples,
+                subspace_dim=args.sgba_subspace_dim,
+                trigger_steps=args.sgba_trigger_steps,
+                trigger_lr=args.sgba_trigger_lr,
+                lambda_ce=args.sgba_lambda_ce,
+                lambda_reg=args.sgba_lambda_reg,
+                init_delta_std=args.sgba_init_delta_std,
+                trigger_batch_size=args.sgba_trigger_batch_size,
+                max_samples=args.sgba_eval_samples,
+                seed=args.sgba_seed,
+            )
+            bd_loader = DataLoader(bd_test, batch_size=args.batch_size, shuffle=False, num_workers=0)
+            print("[Info] Using SGBA bd_loader for ASR evaluation.")
+        elif args.iti_ckpt:
+            bd_test = iti_build_bd_dataset(
+                dataset_name=args.dataset,
+                target_label=args.iti_target_label,
+                ckpt_path=args.iti_ckpt,
+                device=device,
+                data_root=args.data_root,
+                trigger_steps=args.iti_trigger_steps,
+                trigger_lr=args.iti_trigger_lr,
+                alpha=args.iti_alpha,
+                beta=args.iti_beta,
+                trigger_weights=args.iti_trigger_weights,
+                content_layer=args.iti_content_layer,
+                ssim_thresh=args.iti_ssim_thresh,
+                trigger_choice=args.iti_trigger_choice,
+                max_samples=args.iti_eval_samples,
+                seed=args.iti_seed,
+                poison_batch_size=args.iti_poison_batch_size,
+            )
+            bd_loader = DataLoader(bd_test, batch_size=1, shuffle=False, num_workers=0)
+            print(f"[Info] Using ITI bd_loader for ASR evaluation (samples={len(bd_test)}).")
         elif args.dfst_ckpt or auto_dfst_ckpt:
             bd_test = dfst_build_bd_dataset(
                 dataset_name=args.dataset,
@@ -501,7 +649,7 @@ def main():
     if args.lr is None:
         # 通过 ckpt 名或 attack 模式做简易判断
         ckpt_name = (args.checkpoint or args.bb_attack_result  or "").lower()
-        if ("iad" in ckpt_name) or ("ssba" in ckpt_name) or ("inputaware" in ckpt_name) or ("iad" in ckpt_name) or ("lc" in ckpt_name) or ("wanet" in ckpt_name) or ("dfst" in ckpt_name) or (args.iad_ckpt) or (args.dfst_ckpt):
+        if ("iad" in ckpt_name) or ("ssba" in ckpt_name) or ("inputaware" in ckpt_name) or ("iad" in ckpt_name) or ("lc" in ckpt_name) or ("wanet" in ckpt_name) or ("dfst" in ckpt_name) or ("sgba" in ckpt_name) or ("iti" in ckpt_name) or ("dwt" in ckpt_name) or (args.iad_ckpt) or (args.dfst_ckpt) or (args.sgba_ckpt) or (args.iti_ckpt) or (args.dwt_ckpt):
             lr_eff = 0.01
         else:
             lr_eff = 0.001

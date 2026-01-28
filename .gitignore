@@ -1,2 +1,8 @@
+# Large/backdoor model assets
 pre_model/*
 !pre_model/unzip_model.sh
+
+# Local drafts
+《通信学报》jkl终版(2)(1).doc
+*.doc
+*.docx

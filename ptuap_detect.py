@@ -16,6 +16,14 @@ import importlib.util
 import models
 from loader import dataset_loader
 from attack.eval_bd.dfst_eval import build_dfst_bd_dataset as dfst_build_bd_dataset
+from attack.eval_bd.sgba_eval import build_sgba_bd_dataset as sgba_build_bd_dataset
+from attack.eval_bd.precision_strike_eval import build_precision_bd_dataset as precision_build_bd_dataset
+# DWT eval optional; if repo not updated on remote, fall back gracefully.
+try:
+    from attack.eval_bd.dwt_eval import build_dwt_bd_dataset as dwt_build_bd_dataset
+except ModuleNotFoundError:
+    dwt_build_bd_dataset = None
+from attack.eval_bd.iti_eval import build_iti_bd_dataset as iti_build_bd_dataset
 
 
 def _safe_load(path, device):
@@ -72,7 +80,7 @@ def build_model(args, device):
             raw = raw.state_dict()
         except Exception:
             pass
-    for key in ["netC", "model_state_dict", "model"]:
+    for key in ["netC", "model_state_dict", "model", "state_dict"]:
         if isinstance(raw, dict) and key in raw:
             raw = raw[key]
             break
@@ -348,11 +356,16 @@ def derive_noise_prefix(args) -> str:
         model_path = args.bb_attack_result
     elif args.checkpoint:
         model_path = args.checkpoint
-    # Special handling for standalone ckpt names like wanet_cifar.th / iad_cifar.th
+    # Special handling for standalone ckpt names like wanet_cifar.th / iad_cifar.th / iti_cifar.th
     if model_path and os.path.isfile(model_path):
         stem = os.path.splitext(os.path.basename(model_path))[0]
-        if "wanet" in stem or "iad" in stem:
-            tag = "wanet" if "wanet" in stem else "iad"
+        if "wanet" in stem or "iad" in stem or "iti" in stem:
+            if "wanet" in stem:
+                tag = "wanet"
+            elif "iad" in stem:
+                tag = "iad"
+            else:
+                tag = "iti"
             rate = "0_1"  # default rate marker to mimic existing naming convention
             return f"{args.dataset}_{args.arch}_{tag}_{rate}_noise_pair"
     if model_path:
@@ -378,8 +391,13 @@ def derive_run_prefix(args) -> str:
         model_path = args.checkpoint
     if model_path and os.path.isfile(model_path):
         stem = os.path.splitext(os.path.basename(model_path))[0]
-        if "wanet" in stem or "iad" in stem:
-            tag = "wanet" if "wanet" in stem else "iad"
+        if "wanet" in stem or "iad" in stem or "iti" in stem:
+            if "wanet" in stem:
+                tag = "wanet"
+            elif "iad" in stem:
+                tag = "iad"
+            else:
+                tag = "iti"
             return f"{args.dataset}_{args.arch}_{tag}"
     if model_path:
         base_dir = model_path
@@ -436,6 +454,62 @@ def main():
     parser.add_argument("--dfst-attack-mode", type=str, default="dfst", choices=["dfst", "badnet"])
     parser.add_argument("--dfst-poison-rate", type=float, default=0.05)
     parser.add_argument("--dfst-alpha", type=float, default=0.6)
+    # SGBA eval helper (optional, only for BA/ASR check)
+    parser.add_argument("--sgba-ckpt", type=str, default=None,
+                        help="If set, compute BA/ASR with SGBA trigger for this checkpoint.")
+    parser.add_argument("--sgba-target-label", type=int, default=0)
+    parser.add_argument("--sgba-attack-mode", type=str, default="all2one", choices=["all2one", "all2all"])
+    parser.add_argument("--sgba-trigger-path", type=str, default=None,
+                        help="(deprecated) SGBA trigger path. Not used for sample-specific SGBA; kept for CLI compatibility.")
+    parser.add_argument("--sgba-feature-ckpt", type=str, default=None)
+    parser.add_argument("--sgba-subspace-cache", type=str, default=None)
+    parser.add_argument("--sgba-subspace-samples", type=int, default=500)
+    parser.add_argument("--sgba-subspace-dim", type=int, default=20)
+    parser.add_argument("--sgba-trigger-steps", type=int, default=200)
+    parser.add_argument("--sgba-trigger-lr", type=float, default=0.01)
+    parser.add_argument("--sgba-lambda-ce", type=float, default=1.0)
+    parser.add_argument("--sgba-lambda-reg", type=float, default=1e-3)
+    parser.add_argument("--sgba-init-delta-std", type=float, default=1e-3)
+    parser.add_argument("--sgba-trigger-batch-size", type=int, default=16)
+    parser.add_argument("--sgba-eval-samples", type=int, default=1000)
+    parser.add_argument("--sgba-seed", type=int, default=0)
+
+    # Precision-Strike (PBADT) optional backdoor eval
+    parser.add_argument("--precision-ckpt", type=str, default=None, help="Precision-Strike victim checkpoint path.")
+    parser.add_argument("--precision-target-label", type=int, default=0)
+    parser.add_argument("--precision-feature-ckpt", type=str, default=None, help="Clean feature model path.")
+    parser.add_argument("--precision-generator-cache", type=str, default=None, help="poison_cache.pt with generator.")
+    parser.add_argument("--precision-alpha", type=float, default=0.6)
+    parser.add_argument("--precision-patch-size", type=int, default=5)
+    parser.add_argument("--precision-batch-size", type=int, default=64)
+    parser.add_argument("--precision-eval-samples", type=int, default=1000)
+    parser.add_argument("--precision-seed", type=int, default=0)
+    # DWT eval helper (optional, only for BA/ASR check)
+    parser.add_argument("--dwt-ckpt", type=str, default=None,
+                        help="If set, compute BA/ASR with DWT frequency backdoor for this checkpoint.")
+    parser.add_argument("--dwt-target-label", type=int, default=0)
+    parser.add_argument("--dwt-generator-ckpt", type=str, default=None, help="Path to dwt_generator.pth.")
+    parser.add_argument("--dwt-poison-cache", type=str, default=None, help="Path to poison_cache.pt (optional).")
+    parser.add_argument("--dwt-secret-bits", type=int, default=3, help="Secret bits used by generator (default 3).")
+    parser.add_argument("--dwt-batch-size", type=int, default=64, help="Batch size when generating missing poisons.")
+    parser.add_argument("--dwt-eval-samples", type=int, default=1000, help="Max poisoned test samples to evaluate (0=all).")
+    parser.add_argument("--dwt-seed", type=int, default=0)
+    # ITI eval helper (optional, only for BA/ASR check)
+    parser.add_argument("--iti-ckpt", type=str, default=None,
+                        help="If set, compute BA/ASR with ITI triggers for this checkpoint.")
+    parser.add_argument("--iti-target-label", type=int, default=0)
+    parser.add_argument("--iti-trigger-steps", type=int, default=800)
+    parser.add_argument("--iti-trigger-lr", type=float, default=0.01)
+    parser.add_argument("--iti-alpha", type=float, default=5.0)
+    parser.add_argument("--iti-beta", type=float, default=20.0)
+    parser.add_argument("--iti-ssim-thresh", type=float, default=0.99)
+    parser.add_argument("--iti-trigger-weights", type=str, default="1,0.8,0.5,0.3,0.1")
+    parser.add_argument("--iti-content-layer", type=str, default="conv2_2")
+    parser.add_argument("--iti-trigger-choice", type=str, default="target", choices=["target", "random"])
+    parser.add_argument("--iti-poison-batch-size", type=int, default=8)
+    parser.add_argument("--iti-eval-samples", type=int, default=256,
+                        help="How many test samples to generate ITI triggers for (keep small; expensive).")
+    parser.add_argument("--iti-seed", type=int, default=0)
     parser.add_argument("--save-anomaly-noise", nargs="?", const=True, default=True, type=bool,
                         help="Save refined noise tensors for flagged targets.")
     parser.add_argument("--anomaly-save-dir", type=str, default="./anomaly_exports/bn_noise",
@@ -474,6 +548,12 @@ def main():
         model = build_model(args, device)
         dataset_for_search = orig_train
 
+        # Always print clean accuracy first (before running PTUAP)
+        exclude_noise(model)
+        clean_loader = DataLoader(_clean_test, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+        ba = eval_top1(model, clean_loader, device)
+        print(f"[Clean Eval] BA(clean)={ba:.4f}")
+
         # Optional DFST backdoor eval (BA/ASR) for standalone ckpt
         if args.dfst_ckpt:
             clean_loader = DataLoader(_clean_test, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
@@ -492,6 +572,108 @@ def main():
             ba = eval_top1(model, clean_loader, device)
             asr = eval_top1(model, bd_loader, device)
             print(f"[DFST Eval] BA(clean)={ba:.4f}, ASR(bd)={asr:.4f}")
+
+        # Optional SGBA backdoor eval (BA/ASR) for standalone ckpt
+        if args.sgba_ckpt:
+            if args.sgba_attack_mode != "all2one":
+                print("[SGBA Eval] attack_mode=all2all not supported for SGBA; using all2one with target label.")
+            if args.sgba_trigger_path:
+                print("[SGBA Eval] sgba-trigger-path is ignored for SGBA (sample-specific triggers).")
+            clean_loader = DataLoader(_clean_test, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+            bd_test = sgba_build_bd_dataset(
+                dataset_name=args.dataset,
+                target_label=args.sgba_target_label,
+                ckpt_path=args.sgba_ckpt,
+                device=device,
+                feature_ckpt=args.sgba_feature_ckpt or "",
+                subspace_cache=args.sgba_subspace_cache or "",
+                data_root=args.data_root,
+                subspace_samples=args.sgba_subspace_samples,
+                subspace_dim=args.sgba_subspace_dim,
+                trigger_steps=args.sgba_trigger_steps,
+                trigger_lr=args.sgba_trigger_lr,
+                lambda_ce=args.sgba_lambda_ce,
+                lambda_reg=args.sgba_lambda_reg,
+                init_delta_std=args.sgba_init_delta_std,
+                trigger_batch_size=args.sgba_trigger_batch_size,
+                max_samples=args.sgba_eval_samples,
+                seed=args.sgba_seed,
+            )
+            bd_loader = DataLoader(bd_test, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+            ba = eval_top1(model, clean_loader, device)
+            asr = eval_top1(model, bd_loader, device)
+            print(f"[SGBA Eval] BA(clean)={ba:.4f}, ASR(bd)={asr:.4f}")
+
+        # Optional Precision-Strike backdoor eval (BA/ASR) for standalone ckpt
+        if args.precision_ckpt:
+            clean_loader = DataLoader(_clean_test, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+            bd_test = precision_build_bd_dataset(
+                dataset_name=args.dataset,
+                target_label=args.precision_target_label,
+                ckpt_path=args.precision_ckpt,
+                device=device,
+                generator_cache=args.precision_generator_cache or "",
+                feature_ckpt=args.precision_feature_ckpt or "",
+                data_root=args.data_root,
+                alpha=args.precision_alpha,
+                patch_size=args.precision_patch_size,
+                batch_size=args.precision_batch_size,
+                max_samples=args.precision_eval_samples,
+                seed=args.precision_seed,
+            )
+            bd_loader = DataLoader(bd_test, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+            ba = eval_top1(model, clean_loader, device)
+            asr = eval_top1(model, bd_loader, device)
+            print(f"[Precision-Strike Eval] BA(clean)={ba:.4f}, ASR(bd)={asr:.4f} (samples={len(bd_test)})")
+
+        # Optional DWT backdoor eval (BA/ASR) for standalone ckpt
+        if args.dwt_ckpt:
+            if dwt_build_bd_dataset is None:
+                raise ImportError("DWT eval requested but attack.eval_bd.dwt_eval is missing. Pull latest repo.")
+            clean_loader = DataLoader(_clean_test, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+            bd_test = dwt_build_bd_dataset(
+                dataset_name=args.dataset,
+                target_label=args.dwt_target_label,
+                ckpt_path=args.dwt_ckpt,
+                device=torch.device(device),
+                generator_ckpt=args.dwt_generator_ckpt or "",
+                poison_cache=args.dwt_poison_cache or "",
+                data_root=args.data_root,
+                secret_bits=args.dwt_secret_bits,
+                max_samples=args.dwt_eval_samples,
+                batch_size=args.dwt_batch_size,
+                seed=args.dwt_seed,
+            )
+            bd_loader = DataLoader(bd_test, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+            ba = eval_top1(model, clean_loader, device)
+            asr = eval_top1(model, bd_loader, device)
+            print(f"[DWT Eval] BA(clean)={ba:.4f}, ASR(bd)={asr:.4f} (samples={len(bd_test)})")
+
+        # Optional ITI backdoor eval (BA/ASR) for standalone ckpt
+        if args.iti_ckpt:
+            clean_loader = DataLoader(_clean_test, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+            bd_test = iti_build_bd_dataset(
+                dataset_name=args.dataset,
+                target_label=args.iti_target_label,
+                ckpt_path=args.iti_ckpt,
+                device=torch.device(device),
+                data_root=args.data_root,
+                trigger_steps=args.iti_trigger_steps,
+                trigger_lr=args.iti_trigger_lr,
+                alpha=args.iti_alpha,
+                beta=args.iti_beta,
+                trigger_weights=args.iti_trigger_weights,
+                content_layer=args.iti_content_layer,
+                ssim_thresh=args.iti_ssim_thresh,
+                trigger_choice=args.iti_trigger_choice,
+                max_samples=args.iti_eval_samples,
+                seed=args.iti_seed,
+                poison_batch_size=args.iti_poison_batch_size,
+            )
+            bd_loader = DataLoader(bd_test, batch_size=1, shuffle=False, num_workers=0)
+            ba = eval_top1(model, clean_loader, device)
+            asr = eval_top1(model, bd_loader, device)
+            print(f"[ITI Eval] BA(clean)={ba:.4f}, ASR(bd)={asr:.4f} (samples={len(bd_test)})")
 
     base_model_state = copy.deepcopy(model.state_dict())
     criterion = torch.nn.CrossEntropyLoss().to(device)

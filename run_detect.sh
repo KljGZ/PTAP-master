@@ -33,3 +33,4 @@ for m in "${models[@]}"; do
     --batch-size "${BATCH}" \
     --num-workers "${WORKERS}"
 done
+``
